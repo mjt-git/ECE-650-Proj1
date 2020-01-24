@@ -1,0 +1,283 @@
+#include "my_malloc.h"
+#include <unistd.h>
+#include <limits.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <time.h>
+#include <assert.h>
+
+struct Blocks_ini {
+  int * begin;   // (inclusive)
+  int * end;     // (inclusive)
+  int isFree;    // 1 if this block is free, 0 if occupied
+  struct Blocks_ini * prev;    // (inclusive) beginning of previous node
+  struct Blocks_ini * next;    // (inclusive) beginning of next node
+  struct Blocks_ini * nextFree;
+  struct Blocks_ini * prevFree;
+};
+
+typedef struct Blocks_ini Blocks;
+Blocks * info = NULL;    // start of the whole linkedlist
+Blocks * last = NULL;    // the tail of linkedlist
+Blocks * firstFree = NULL;
+Blocks * lastFree = NULL;
+int enlargement = 2;
+
+// This function adds node to the last freeList
+void addToLastFree(Blocks * node) {    
+  node->nextFree = NULL;
+  if(lastFree != NULL) {
+    lastFree->nextFree = node;
+    node->prevFree = lastFree;
+    lastFree = node;
+  }
+  else {
+    firstFree = node;
+    lastFree = node;
+    node->prevFree = NULL;
+  }
+  node->isFree = 1;
+}
+
+// This function deletes node from free list
+void deleteFromFreeList(Blocks * node) {
+  if(node->prevFree != NULL) {node->prevFree->nextFree = node->nextFree;}
+  if(node->nextFree != NULL) {node->nextFree->prevFree = node->prevFree;}
+  if(node == firstFree) {firstFree = node->nextFree;}
+  if(node == lastFree) {lastFree = node->prevFree;}
+  node->isFree = 0;
+}
+
+// this function allocate new space to the end of linkedlist. If the last node is free, simply enlarge it and return; otherwise, allocate more space to create one occupied node and another new free node
+void * allocateToLast(size_t size) {
+  if(last->isFree == 1) {
+    size_t increSize = size;
+    int * newAddress = sbrk(increSize);
+    last->end = (int*)((char*)newAddress + increSize - 1);    // update last node
+    deleteFromFreeList(last);
+    last->prevFree = NULL;
+    last->nextFree = NULL;
+    return last->begin;
+  }
+  else {    // last is occupied
+    size_t increSize = size + sizeof(Blocks);
+    Blocks * newAddress = sbrk(increSize);
+    last->next = newAddress;
+    newAddress->begin = (int*)((char*)newAddress + sizeof(Blocks));
+    newAddress->end =  (int*)((char*)newAddress + increSize - 1);
+    newAddress->isFree = 0;
+    newAddress->prev = last;
+    newAddress->next = NULL;
+    newAddress->nextFree = NULL;
+    newAddress->prevFree = NULL;
+    last = newAddress;
+    return newAddress->begin;
+  }
+}
+
+// This function initialize the whole linkedlist
+int * initializeInfo(size_t size) {
+  size_t increSize = (size + sizeof(Blocks)) * enlargement;
+  info = sbrk(increSize);
+  info->begin = (int*)((char*)info + sizeof(Blocks));
+  info->end = (int*)((char*)info->begin + size - 1);
+  info->isFree = 0;
+  info->prev = NULL;
+  info->next = (Blocks*)((char*)info + sizeof(Blocks) + size);
+  info->nextFree = NULL;
+  info->prevFree = NULL;   // prevFree of every occupied node is NULL
+
+  info->next->begin = (int*)((char*)info->next + sizeof(Blocks));
+  info->next->end = (int*)((char*)info + increSize - 1);
+  info->next->isFree = 1;
+  info->next->next = NULL;
+  info->next->prev = info;
+  info->next->nextFree = NULL;
+  info->next->prevFree = NULL;
+
+  firstFree = info->next;
+  lastFree = info->next;
+  last = info->next;
+  return info->begin;
+}
+
+void *ff_malloc(size_t size) {
+  if(info == NULL) {      // when info is NULL, nothing has been allcated
+    return initializeInfo(size);
+  }
+  else {     // first try to find available one, if not exist, allocate new space
+    Blocks * head = firstFree;
+    while(head != NULL) {
+      size_t remain = ((char*)head->end-(char*)head->begin) + 1;
+      if(remain >= size) {
+	if(remain - size >= size + sizeof(Blocks)) {   // split big node
+	  Blocks * tmpNext = head->next;
+	  head->next = (Blocks*)((char*)head->begin + size);
+	  head->next->begin = (int*)((char*)head->next + sizeof(Blocks));
+	  head->next->end = head->end;
+	  head->next->isFree = 1;
+	  head->next->prev = head;
+	  head->next->next = tmpNext;
+	  head->next->nextFree = head->nextFree;
+	  head->next->prevFree = head->prevFree;
+	  if(head->prevFree != NULL) {head->prevFree->nextFree = head->next;}
+	  if(head->nextFree != NULL) {head->nextFree->prevFree = head->next;}
+	  if(tmpNext != NULL) {tmpNext->prev = head->next;}
+	  head->end = (int*)((char*)head->next - 1);    // update head
+	  if(firstFree == head) {firstFree = head->next;} // update global variable
+	  if(last == head) {last = head->next;}
+	  if(lastFree == head) {lastFree = head->next;}
+	}
+	else {
+	  deleteFromFreeList(head);   // only use this "head" node
+	}
+	head->isFree = 0;
+	head->prevFree = NULL;
+	head->nextFree = NULL;
+	return head->begin;
+      }
+      head = head->nextFree;
+    }
+    // request new space
+    return allocateToLast(size);
+  }
+}
+
+void ff_free(void *ptr) {
+  Blocks * targetNode = (Blocks*)((char*)ptr - sizeof(Blocks));
+  int rightFreed = (targetNode->next != NULL && targetNode->next->isFree == 1) ? 1 : 0;
+  int leftFreed = (targetNode->prev != NULL && targetNode->prev->isFree == 1) ? 1 : 0;
+
+  if(rightFreed == 1 && leftFreed == 0) {     // merge the right one
+    Blocks * fore = targetNode->next;
+    targetNode->end = fore->end;
+    targetNode->next = fore->next;
+    targetNode->nextFree = fore->nextFree;
+    targetNode->prevFree = fore->prevFree;
+    if(fore->next != NULL) {fore->next->prev = targetNode;}
+    if(fore->nextFree != NULL) {fore->nextFree->prevFree = targetNode;}
+    if(fore->prevFree != NULL) {fore->prevFree->nextFree = targetNode;}
+    if(firstFree == fore) {firstFree = targetNode;}
+    if(lastFree == fore) {lastFree = targetNode;}
+    if(last == fore) {last = targetNode;}
+    targetNode->isFree = 1;
+  }
+  else if(rightFreed == 0 && leftFreed == 1) {     // merge the left one
+    Blocks * before = targetNode->prev;
+    before->end = targetNode->end;
+    before->next = targetNode->next;
+    if(targetNode->next != NULL) {targetNode->next->prev = before;}
+    if(last == targetNode) {last = before;}
+  }
+  else if(rightFreed == 1 && leftFreed == 1) {   // merge the left one and right one, pull before and fore from freeList, put together to the lastFree
+    Blocks * fore = targetNode->next;
+    Blocks * before = targetNode->prev;
+    deleteFromFreeList(before);
+    deleteFromFreeList(fore);
+    // merge three nodes, put to the end
+    before->end = fore->end;
+    before->next = fore->next;
+    if(fore->next != NULL) {fore->next->prev = before;}
+    before->nextFree = NULL;
+    if(last == fore) {last = before;}
+    addToLastFree(before);
+  }
+  else {    // no merge needed, let this targetNode to be the lastFree (foreChanged == 0 && beforeChanged == 0)
+    addToLastFree(targetNode);
+  }
+}
+
+
+void *bf_malloc(size_t size) {
+  if(info == NULL) {      // when info is NULL, nothing has been allcated
+    return initializeInfo(size);
+  }
+  else {
+    Blocks * head = firstFree;
+    Blocks * minDelta = NULL;   // represent the node with minimum difference
+    size_t delta = INT_MAX;     // record temporary minimum difference
+    while(head != NULL) {      // find the most fit block
+      long tmpDelta = ((char*)head->end-(char*)head->begin) + 1 - size;
+      if(tmpDelta >= 0) {
+	if(tmpDelta == 0) {    // perfect fit, directly return
+	  deleteFromFreeList(head);
+	  head->prevFree = NULL;
+	  head->nextFree = NULL;
+	  return head->begin;
+	}
+	if(tmpDelta < delta) {
+	  delta = tmpDelta;
+	  minDelta = head;
+	}
+      }
+      head = head->nextFree;
+    }
+    if(minDelta != NULL) {    // meaning there exists most fit one
+      size_t remain = ((char*)minDelta->end-(char*)minDelta->begin) + 1;
+      if(remain - size >= size + sizeof(Blocks)) {   // split big node
+	Blocks * tmpNext = minDelta->next;
+	minDelta->next = (Blocks*)((char*)minDelta->begin + size);
+	minDelta->next->begin = (int*)((char*)minDelta->next + sizeof(Blocks));
+	minDelta->next->end = minDelta->end;
+	minDelta->next->isFree = 1;
+	minDelta->next->prev = minDelta;
+	minDelta->next->next = tmpNext;
+	minDelta->next->nextFree = minDelta->nextFree;
+	minDelta->next->prevFree = minDelta->prevFree;
+	if(minDelta->prevFree != NULL) {minDelta->prevFree->nextFree = minDelta->next;}
+	if(minDelta->nextFree != NULL) {minDelta->nextFree->prevFree = minDelta->next;}
+	if(tmpNext != NULL) {tmpNext->prev = minDelta->next;}
+	minDelta->end = (int*)((char*)minDelta->next - 1);    // update minDelta
+	if(firstFree == minDelta) {firstFree = minDelta->next;} // update global variable
+	if(last == minDelta) {last = minDelta->next;}
+	if(lastFree == minDelta) {lastFree = minDelta->next;}
+	minDelta->isFree = 0;
+	minDelta->prevFree = NULL;
+	minDelta->nextFree = NULL;
+	return minDelta->begin;
+      }
+      else {      // not split node
+	deleteFromFreeList(minDelta);
+	minDelta->prevFree = NULL;
+	minDelta->nextFree = NULL;
+	return minDelta->begin;
+      }
+    }
+    else {    // request new space
+      return allocateToLast(size);
+    }
+  }
+}
+
+void bf_free(void *ptr) {
+  ff_free(ptr);
+}
+
+unsigned long get_data_segment_size() {
+  return (unsigned long)((char*)last->end - (char*)info);
+}
+
+unsigned long get_data_segment_free_space_size() {
+  unsigned long result = 0;
+  Blocks * head = firstFree;
+  while(head != NULL) {
+    result += (char*)(head->end) - (char*)(head->begin) + 1;
+    result += sizeof(Blocks);
+    head = head->nextFree;
+  }
+  return result;  
+}
+
+/*
+int main() {
+  int* arr[10];
+  arr[0] = bf_malloc(16);
+  arr[1] = bf_malloc(160);
+  arr[2] = bf_malloc(48);
+  arr[3] = bf_malloc(156);
+  bf_free(arr[1]);
+  bf_free(arr[3]);
+  arr[5] = bf_malloc(12);
+  return 0;
+}
+*/
